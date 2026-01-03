@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Giả lập lai hóa orbital (p5.js)</title>
+  <link rel="stylesheet" href="style.css" />
+  
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/p5.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/addons/p5.dom.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.6.0/addons/p5.sound.min.js"></script>
+</head>
+<body>
+  <div id="sidebar">
+    <h1 id="title">Lai hóa orbital</h1>
+
+    <label for="langSelect" id="langLabel">Ngôn ngữ</label>
+    <select id="langSelect">
+      <option value="vi">Tiếng Việt</option>
+      <option value="en">English</option>
+    </select>
+
+    <div class="controls">
+      <button id="btnS" class="ctrl">Orbital s</button>
+      <button id="btnP" class="ctrl">Orbital p</button>
+      <button id="btnHybridSP" class="ctrl">Lai hóa sp</button>
+      <button id="btnHybridSP2" class="ctrl">Lai hóa sp2</button>
+      <button id="btnHybridSP3" class="ctrl">Lai hóa sp3</button>
+
+      <div class="modeRow">
+        <button id="btnOverlay" class="ctrl mode-toggle active">Dạng lớp phủ</button>
+        <button id="btnPoints" class="ctrl mode-toggle">Dạng điểm</button>
+      </div>
+
+      <button id="btnCapture" class="ctrl">Chụp ảnh</button>
+      <button id="btnReset" class="ctrl">Reset</button>
+
+      <div class="toggleRow">
+        <input type="checkbox" id="toggleSplit" />
+        <label for="toggleSplit" id="labelSplit">Tách/Nhập orbital lai hóa</label>
+      </div>
+
+      <div class="toggleRow">
+        <input type="checkbox" id="toggleAxes" />
+        <label for="toggleAxes" id="labelAxes">Hiện trục orbital</label>
+      </div>
+
+      <div class="toggleRow">
+        <input type="checkbox" id="toggleOpaque" />
+        <label for="toggleOpaque" id="labelOpaque">Tắt trong suốt</label>
+      </div>
+    </div>
+
+    <hr />
+
+    <div id="status">
+      <div id="counts">
+        <div>Số orbital s: <span id="countS">0</span> / 1</div>
+        <div>Số orbital p: <span id="countP">0</span> / 3</div>
+        <div>Số orbital lai hóa: <span id="countH">0</span></div>
+      </div>
+    </div>
+
+    <footer>
+      <small id="credits">Mô phỏng bằng p5.js — hoahocabc</small>
+    </footer>
+  </div>
+
+  <div id="canvasContainer"></div>
+
+  <script src="sketch.js"></script>
+</body>
+</html>
