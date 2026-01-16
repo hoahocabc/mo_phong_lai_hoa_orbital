@@ -94,6 +94,24 @@ select {
 .toggleRow { display: flex; align-items: center; gap: 8px; }
 .toggleRow input { transform: scale(1.2); margin-right: 6px; }
 
+.sliderRow {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+#sliderAlpha {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+#alphaValue {
+  font-size: 13px;
+  color: rgba(230, 238, 246, 0.7);
+  text-align: right;
+}
+
 #status { margin-top: 16px; font-size: 14px; line-height: 1.5; }
 #counts div { margin-bottom: 6px; }
 

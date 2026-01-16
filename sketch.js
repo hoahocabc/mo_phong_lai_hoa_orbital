@@ -13,6 +13,13 @@ let showAxes = false;
 // When true, render everything opaque (disable transparency)
 let disableTransparency = false;
 
+// User-controlled transparency
+let transparencyFactor = 1.0;
+
+// Config range for transparency slider
+const ALPHA_FACTOR_MIN = 0.15; // Rightmost (100): Very transparent (Ghost)
+const ALPHA_FACTOR_MAX = 6.0;  // Leftmost (0): Opaque (Solid)
+
 // split/join state & animation
 let splitState = false;
 let splitAnimating = false;
@@ -24,8 +31,11 @@ let rotStart = 0;
 let rotAnimating = false;
 const ROTATION_DURATION_MS = 1000; // 0->180° in 1s
 
-let rotX = -0.4, rotY = 0.6; 
 let camDist = 500;
+// New camera state variables
+let camTheta = 0.6; // Horizontal angle
+let camPhi = -0.4;  // Vertical angle
+let camUp;          // Camera up vector to support full rotation
 
 let isDragging = false;
 let lastMouseX = 0, lastMouseY = 0;
@@ -48,6 +58,8 @@ let btnHybridSP3El = null;
 let btnCaptureEl = null;
 let btnOverlayEl = null;
 let btnPointsEl = null;
+let sliderAlphaEl = null;
+let alphaValueEl = null;
 
 let hybridized = false;
 
@@ -82,26 +94,78 @@ let sElectrons = [];
 const ELECTRONS_S = 520;
 const ELECTRONS_P = 600;
 const ELECTRONS_HYBRID = 650;
-const ELECTRON_SIZE = 1.1 * SIZE_SCALE;          // smaller electrons
-const ELECTRON_MIN_DIST = ELECTRON_SIZE * 1.9;    // separation
+const ELECTRON_SIZE = 1.1 * SIZE_SCALE;          
+const ELECTRON_MIN_DIST = ELECTRON_SIZE * 1.9;    
 const ELECTRON_SPEED = 0.38;
 const ELECTRON_NOISE = 0.12;
 const ELECTRON_DAMP = 0.93;
-const ELECTRON_NEAR_MARGIN = 0.35; // 10% outside zone handled by scale factors
-const ELECTRON_BRIGHTNESS = 0.78;   // dim electrons to avoid glare
-const ELECTRON_ALPHA_BASE = 150;    // lower alpha for transparency
-const ELECTRON_ALPHA_OPAQUE = 210;  // when transparency disabled
-const CORE_MIN_DIST = 14 * SIZE_SCALE; // keep electrons away from center
-const NODE_BAND_P = 4 * SIZE_SCALE;    // near nodal plane for p (small band)
-const NODE_BAND_H = 5 * SIZE_SCALE;    // near nodal plane for hybrids (small band)
+const ELECTRON_NEAR_MARGIN = 0.35; 
+const ELECTRON_BRIGHTNESS = 0.78;   
+const ELECTRON_ALPHA_BASE = 150;    
+const ELECTRON_ALPHA_OPAQUE = 210;  
+const CORE_MIN_DIST = 14 * SIZE_SCALE; 
+const NODE_BAND_P = 4 * SIZE_SCALE;    
+const NODE_BAND_H = 5 * SIZE_SCALE;    
 
-// Mix clustering tuning (point-mode knead)
-const MIX_CLUSTER_MAX = 130 * SIZE_SCALE;  // initial gather radius
-const MIX_CLUSTER_MIN = 70 * SIZE_SCALE;   // final cluster radius (not too small)
-const MIX_PULL_BASE = 0.18;
-const MIX_PULL_GAIN = 0.26;
-const MIX_CHAOS_PHASE = 0.38;              // when chaos kicks in
-const MIX_CHAOS_KICK = 0.48;               // strength of chaotic kicks
+// --- Added: outer-tip normal smoothing to avoid "pointy" look when rotated ---
+const OUTER_TIP_NORMAL_SMOOTH = 0.22; // 0..0.5 (bigger = rounder highlight at tip)
+const OUTER_TIP_SPECULAR_MUL = 0.45;
+const OUTER_TIP_SHININESS_MUL = 0.45;
+
+// --- NEW: transparency pipeline controls ---
+const TRANSPARENT_TWO_PASS = true;
+
+// Helper to set up GL state for transparency
+function setTransparentState(enableDepthWrite) {
+  const gl = drawingContext;
+  if (!gl) return;
+
+  if (disableTransparency) {
+    gl.disable(gl.BLEND);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(true);
+    gl.disable(gl.CULL_FACE);
+  } else {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(enableDepthWrite); // Control depth writing
+    
+    // Default to Back-face culling enabled for standard transparent objects
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+  }
+}
+
+// Wrapper to draw with back-face culling logic
+function drawWithCulling(drawFn) {
+  const gl = drawingContext;
+  if (!gl || disableTransparency || !TRANSPARENT_TWO_PASS) {
+    drawFn();
+    return;
+  }
+  
+  // Pass 1: Back faces
+  gl.cullFace(gl.FRONT);
+  drawFn();
+  
+  // Pass 2: Front faces
+  gl.cullFace(gl.BACK);
+  drawFn();
+}
+
+// Special wrapper for Small Lobes: Draw WITHOUT culling to make them look "thick"
+function drawNoCulling(drawFn) {
+    const gl = drawingContext;
+    if (!gl) { drawFn(); return; }
+    gl.disable(gl.CULL_FACE);
+    drawFn();
+    if (!disableTransparency) {
+        gl.enable(gl.CULL_FACE); // restore
+        gl.cullFace(gl.BACK);
+    }
+}
+
 
 // Strings
 const STRINGS = {
@@ -118,6 +182,7 @@ const STRINGS = {
     labelSplit: "Tách/Nhập orbital",
     labelAxes: "Hiện trục orbital",
     labelOpaque: "Tắt trong suốt",
+    labelAlpha: "Độ trong suốt orbital",
     btnReset: "Reset",
     btnCapture: "Chụp ảnh",
     credits: "Mô phỏng bằng p5.js — hoahocabc",
@@ -135,6 +200,7 @@ const STRINGS = {
     labelSplit: "Split/Join orbitals",
     labelAxes: "Show orbital axes",
     labelOpaque: "Disable transparency",
+    labelAlpha: "Orbital transparency",
     btnReset: "Reset",
     btnCapture: "Capture",
     credits: "Simulation with p5.js — hoahocabc",
@@ -147,7 +213,9 @@ function setup() {
   adjustSidebarWidth();
   setAttributes('antialias', true);
   setAttributes('preserveDrawingBuffer', true);
-  setAttributes('alpha', true); // allow transparent background when capturing
+  setAttributes('alpha', true); 
+  
+  pixelDensity(min(window.devicePixelRatio, 2));
 
   const w = window.innerWidth - sidebarWidth;
   const h = window.innerHeight;
@@ -155,8 +223,45 @@ function setup() {
   canvas.parent('canvasContainer');
 
   perspective(FOV, w / h, CAMERA_NEAR, CAMERA_FAR);
+  
+  camPos = createVector(0, 0, camDist);
+  let rX = -0.4;
+  let rY = 0.6;
+  let q1 = new Quaternion().setFromAxisAngle(createVector(1,0,0), rX);
+  let q2 = new Quaternion().setFromAxisAngle(createVector(0,1,0), rY);
+  camPos = q2.rotateVector(q1.rotateVector(camPos));
+  camUp = createVector(0, 1, 0);
+  camUp = q2.rotateVector(q1.rotateVector(camUp));
 
   setupUI();
+}
+
+// Simple Quaternion class for 3D rotation
+class Quaternion {
+  constructor(w=1, x=0, y=0, z=0) {
+    this.w = w; this.x = x; this.y = y; this.z = z;
+  }
+  setFromAxisAngle(axis, angle) {
+    let s = Math.sin(angle / 2);
+    this.w = Math.cos(angle / 2);
+    this.x = axis.x * s;
+    this.y = axis.y * s;
+    this.z = axis.z * s;
+    return this;
+  }
+  multiply(q) {
+    let nw = this.w*q.w - this.x*q.x - this.y*q.y - this.z*q.z;
+    let nx = this.w*q.x + this.x*q.w + this.y*q.z - this.z*q.y;
+    let ny = this.w*q.y - this.x*q.z + this.y*q.w + this.z*q.x;
+    let nz = this.w*q.z + this.x*q.y - this.y*q.x + this.z*q.w;
+    return new Quaternion(nw, nx, ny, nz);
+  }
+  rotateVector(v) {
+    let qv = new Quaternion(0, v.x, v.y, v.z);
+    let inv = new Quaternion(this.w, -this.x, -this.y, -this.z);
+    let res = this.multiply(qv).multiply(inv);
+    return createVector(res.x, res.y, res.z);
+  }
 }
 
 function setupUI(){
@@ -169,6 +274,8 @@ function setupUI(){
   btnCaptureEl = select('#btnCapture');
   btnOverlayEl = select('#btnOverlay');
   btnPointsEl = select('#btnPoints');
+  sliderAlphaEl = select('#sliderAlpha');
+  alphaValueEl = select('#alphaValue');
   const toggleSplitEl = select('#toggleSplit');
   const toggleAxesEl = select('#toggleAxes');
   const toggleOpaqueEl = select('#toggleOpaque');
@@ -192,6 +299,16 @@ function setupUI(){
   if (btnCaptureEl) btnCaptureEl.mousePressed(()=> captureImage4KTransparent());
   if (btnReset) btnReset.mousePressed(()=> resetAll());
 
+  if (sliderAlphaEl) {
+    const applyAlphaSlider = ()=> {
+      const val = sliderAlphaEl.value();
+      transparencyFactor = computeTransparencyFactor(val);
+      if (alphaValueEl) alphaValueEl.html(`${val}%`);
+    };
+    applyAlphaSlider();
+    sliderAlphaEl.input(applyAlphaSlider);
+  }
+
   toggleSplitEl.changed(()=> {
     splitState = toggleSplitEl.elt.checked;
     splitAnimating = true;
@@ -202,13 +319,25 @@ function setupUI(){
     rotStart = millis();
   });
 
-  toggleAxesEl.changed(()=> { showAxes = toggleAxesEl.elt.checked; });
+  if (toggleAxesEl) {
+    toggleAxesEl.elt.checked = false; 
+    showAxes = false; 
+    toggleAxesEl.changed(()=> { 
+      showAxes = toggleAxesEl.elt.checked; 
+    });
+  }
+
   if (toggleOpaqueEl) toggleOpaqueEl.changed(()=> { disableTransparency = toggleOpaqueEl.elt.checked; });
 
   updateLanguage();
   updateCounts();
   updateButtonsState();
   updateModeButtonsState();
+}
+
+function computeTransparencyFactor(sliderVal){
+  const t = constrain(sliderVal, 0, 100) / 100.0;
+  return map(t, 0, 1.0, ALPHA_FACTOR_MAX, ALPHA_FACTOR_MIN);
 }
 
 function setRenderMode(mode){
@@ -325,6 +454,7 @@ function updateLanguage(){
   select('#labelSplit').html(s.labelSplit);
   select('#labelAxes').html(s.labelAxes);
   select('#labelOpaque').html(s.labelOpaque);
+  select('#labelAlpha').html(s.labelAlpha);
   select('#btnReset').html(s.btnReset);
   if (select('#btnCapture')) select('#btnCapture').html(s.btnCapture);
   select('#credits').html(s.credits);
@@ -458,11 +588,30 @@ function resetAll(){
   splitAnimating = false;
   rotAnimating = false;
   const ts = select('#toggleSplit'); if (ts) ts.elt.checked = false;
+  
   showAxes = false;
   const ta = select('#toggleAxes'); if (ta) ta.elt.checked = false;
+  
   disableTransparency = false;
   const to = select('#toggleOpaque'); if (to) to.elt.checked = false;
-  rotX = -0.4; rotY = 0.6; camDist = 500;
+  if (sliderAlphaEl) {
+    sliderAlphaEl.value(50);
+    transparencyFactor = computeTransparencyFactor(50);
+  } else {
+    transparencyFactor = 1.0;
+  }
+  if (alphaValueEl) alphaValueEl.html(`${sliderAlphaEl ? sliderAlphaEl.value() : 50}%`);
+  
+  camDist = 500;
+  camPos = createVector(0, 0, camDist);
+  let rX = -0.4;
+  let rY = 0.6;
+  let q1 = new Quaternion().setFromAxisAngle(createVector(1,0,0), rX);
+  let q2 = new Quaternion().setFromAxisAngle(createVector(0,1,0), rY);
+  camPos = q2.rotateVector(q1.rotateVector(camPos));
+  camUp = createVector(0, 1, 0);
+  camUp = q2.rotateVector(q1.rotateVector(camUp));
+
   hybridized = false;
   mixParticles = [];
   mixInitializedFor = 0;
@@ -497,17 +646,16 @@ function draw(){
 
   perspective(FOV, width / height, CAMERA_NEAR, CAMERA_FAR);
 
-  const camRadius = cameraBaseZ() + camDist;
-  const cx = camRadius * Math.cos(rotX) * Math.sin(rotY);
-  const cy = camRadius * Math.sin(rotX);
-  const cz = camRadius * Math.cos(rotX) * Math.cos(rotY);
-  camPos = createVector(cx, cy, cz);
-  const upY = (Math.cos(rotX) >= 0) ? 1 : -1;
-  camera(cx, cy, cz, 0, 0, 0, 0, upY, 0);
+  let camDir = camPos.copy().normalize();
+  let totalDist = cameraBaseZ() + camDist;
+  let finalCamPos = camDir.copy().mult(totalDist);
 
-  applyLighting();
+  camera(finalCamPos.x, finalCamPos.y, finalCamPos.z, 0, 0, 0, camUp.x, camUp.y, camUp.z);
+  camPos = finalCamPos;
 
   const hybridDisplay = computeHybridDisplayState();
+
+  applyLighting();
 
   if (kneading) {
     const t = millis() - kneadStart;
@@ -516,10 +664,16 @@ function draw(){
     push();
     rotateY(0.25 * Math.sin(prog * Math.PI * 2));
     scale(1 + 0.02 * Math.sin(prog * Math.PI * 3));
-    beginTransparent();
-    if (renderMode === 'points') drawKneadBlobPoints(prog);
-    else drawKneadBlobOverlay(prog);
-    endTransparent();
+    
+    // Kneading Blob
+    setTransparentState(true); 
+    drawWithCulling(() => {
+        if (renderMode === 'points') drawKneadBlobPoints(prog);
+        else drawKneadBlobOverlay(prog);
+    });
+    const gl = drawingContext;
+    if(gl) gl.depthMask(true); 
+    
     pop();
 
     if (prog >= 1) {
@@ -534,117 +688,404 @@ function draw(){
       updateCounts();
     }
   } else {
-    beginTransparent();
+
+    // DRAW AXES FIRST (Standard depth test)
+    if (showAxes && !kneading) {
+      drawAxesNormal(hybridDisplay);
+    }
+
     if (renderMode === 'overlay') {
-      if (hybridized) {
-        drawAllSP(false, 0, true);
-        drawHybrids(hybridDisplay);
-        drawPOrbitals();
-      } else {
-        drawAllSP(false, 0, false);
-        drawHybrids(hybridDisplay);
-      }
+       drawSortedOrbitals(hybridDisplay);
     } else {
-      ensureElectronClouds();
-      stepElectronMotion(hybridDisplay);
-      drawElectronClouds(hybridDisplay);
-    }
-    endTransparent();
-  }
-
-  if (showAxes && !kneading) drawAxesOverlay(hybridDisplay);
-}
-
-function beginTransparent(){
-  const gl = drawingContext;
-  if (!disableTransparency) {
-    if (gl) {
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-      gl.depthMask(false);
-    }
-  } else {
-    if (gl) {
-      gl.disable(gl.BLEND);
-      gl.depthMask(true);
+       setTransparentState(true);
+       ensureElectronClouds();
+       stepElectronMotion(hybridDisplay);
+       drawElectronClouds(hybridDisplay);
+       const gl = drawingContext; if(gl) gl.depthMask(true);
     }
   }
 }
-function endTransparent(){
+
+// 4. IMPROVED SORTING & RENDERING PIPELINE (INSIDE-OUT FORCE)
+function drawSortedOrbitals(hybridDisplay) {
+  let smallLobeList = [];
+  let bigLobeList = [];
+
+  // Add P-Orbitals
+  for (let i = 0; i < pOrbitals.length; i++) {
+    const pos = getDisplayPPos(i);
+    // Treat P orbitals as "Core" items (since they are inside S, and similar density to small lobes)
+    smallLobeList.push({
+      type: 'p',
+      index: i,
+      pos: pos,
+    });
+  }
+
+  // Add Hybrid Orbitals
+  if (hybridDisplay && hybridDisplay.items) {
+    for (let item of hybridDisplay.items) {
+      const h = item.hybrid;
+      
+      const posBig = p5.Vector.add(item.worldPos, p5.Vector.mult(item.displayDir, h.bigRadius * 1.5 * 0.5));
+      const posSmall = p5.Vector.sub(item.worldPos, p5.Vector.mult(item.displayDir, h.smallRadius * 1.2 * 0.5));
+
+      // Separate Small from Big
+      smallLobeList.push({
+        type: 'h_small',
+        item: item, 
+        pos: posSmall,
+      });
+
+      bigLobeList.push({
+        type: 'h_big',
+        item: item, 
+        pos: posBig,
+      });
+    }
+  }
+
+  // Add S-Orbital (Always the biggest Shell)
+  if (sCount > 0) {
+    bigLobeList.push({
+      type: 's',
+      pos: createVector(0,0,0),
+      // S-orbital is the outermost shell
+      forceLast: true 
+    });
+  }
+
   const gl = drawingContext;
+
+  // --- PHASE 1: DRAW ALL "CORE" OBJECTS (Small Lobes & P-Orbitals) FIRST ---
+  setTransparentState(true);
+  
+  for (let obj of smallLobeList) {
+      if (obj.type === 'p') {
+        const i = obj.index;
+        const displayAxis = getDisplayPAxis(i);
+        const displayPos = getDisplayPPos(i);
+        push();
+        translate(displayPos.x, displayPos.y, displayPos.z);
+        drawWithCulling(() => drawPorbital(displayAxis, false, 0, i, camPos, true));
+        pop();
+      } 
+      else if (obj.type === 'h_small') {
+        // Draw small lobes slightly thicker/opaque
+        drawNoCulling(() => drawHybridLobe('small', obj.item));
+      }
+  }
+
+  // --- PHASE 2: DRAW ALL "SHELL" OBJECTS (Big Lobes & S-Orbital) LAST ---
+  bigLobeList.forEach(obj => {
+      obj.dist = p5.Vector.sub(obj.pos, camPos).mag();
+  });
+  
+  bigLobeList.sort((a, b) => {
+    if (a.forceLast) return 1; 
+    if (b.forceLast) return -1; 
+    return b.dist - a.dist;
+  });
+
+  for (let obj of bigLobeList) {
+      if (obj.type === 's') {
+        setTransparentState(false); 
+        drawWithCulling(() => drawSOrbital());
+      } 
+      else if (obj.type === 'h_big') {
+        drawWithCulling(() => drawHybridLobe('big', obj.item));
+      }
+  }
+  
   if (gl) gl.depthMask(true);
 }
 
-function A(a){ return disableTransparency ? 255 : a; }
-function getShininess(){ return disableTransparency ? 2 : 10; }
+function drawSOrbital() {
+  const matScale = captureMode ? 1.0 : 1.0;
+  push();
+  noStroke();
+  const sRadius = 60 * SIZE_SCALE;
+  
+  // FIX #6: EVEN BRIGHTER S-ORBITAL
+  // Increased base color components further for a "glowing" effect
+  const [sr, sg, sb] = scaledRGB(160, 220, 255, matScale); 
+  
+  const shellAlpha = 40; 
+  specularMaterial(sr * 0.3, sg * 0.3, sb * 0.3, A(160)); 
+  
+  // Stronger emission to make it radiant
+  emissiveMaterial(50, 90, 130, A(shellAlpha * 0.8));
+
+  fill(sr, sg, sb, A(shellAlpha));
+  ambientMaterial(sr, sg, sb, A(shellAlpha));
+  shininess(getShininess() + 4);
+  
+  sphere(sRadius, 128, 128);
+  pop();
+}
+
+function drawHybridLobe(type, item) {
+  const h = item.hybrid;
+  const matMul = disableTransparency ? 0.65 : 1.0;
+  const alphaMul = disableTransparency ? 0.72 : 1.0;
+
+  push();
+  translate(item.worldPos.x, item.worldPos.y, item.worldPos.z);
+  alignVectorToAxis(item.displayDir);
+
+  const commonShininess = getShininess() + 5;
+
+  if (type === 'small') {
+    // Small lobe
+    const smallScaleZ = 1.2;
+    const innerSmallTranslate = h.smallRadius * smallScaleZ;
+    push();
+    translate(0, 0, -innerSmallTranslate);
+    rotateX(Math.PI); 
+    noStroke();
+    
+    // Transparent enough to see axis inside
+    const smallSpecA = A(80 * alphaMul); 
+    const smallFillA = A(55 * alphaMul); 
+
+    specularMaterial(120 * 0.9 * matMul, 255 * 0.9 * matMul, 180 * 0.9 * matMul, smallSpecA);
+    fill(120 * matMul, 255 * matMul, 180 * matMul, smallFillA); 
+    ambientMaterial(120 * matMul, 255 * matMul, 180 * matMul, smallFillA);
+    
+    shininess(2); 
+    
+    scale(0.8, 0.8, smallScaleZ);
+    drawTaperedLobe(h.smallRadius);
+    pop();
+  } else {
+    // Large lobe
+    const bigScaleZ = 1.5;
+    const innerBigTranslate = h.bigRadius * bigScaleZ;
+    push();
+    translate(0, 0, innerBigTranslate); 
+    noStroke();
+    
+    // Keep big lobe very transparent
+    const bigFillA = A(45 * alphaMul);
+    const bigSpecA = A(120 * alphaMul);
+    
+    specularMaterial(120 * 0.9 * matMul, 255 * 0.9 * matMul, 180 * 0.9 * matMul, bigSpecA);
+    fill(120 * matMul, 255 * matMul, 180 * matMul, bigFillA); 
+    ambientMaterial(120 * matMul, 255 * matMul, 180 * matMul, bigFillA);
+    shininess(commonShininess);
+
+    scale(1, 1, bigScaleZ);
+
+    drawTaperedLobeOuterTipSmooth(h.bigRadius);
+    pop();
+  }
+    
+  pop();
+}
+
+function A(a){ 
+  if (disableTransparency) return 255;
+  return constrain(a * transparencyFactor, 0, 255); 
+}
+
+function getShininess(){ 
+  if (disableTransparency) return 2;
+  // Dynamic shininess
+  if (transparencyFactor > 1.5) return 2; 
+  return 10;
+}
 
 function applyLighting(){
-  const s = 1.0; // keep lighting identical in capture vs live view
+  const s = 1.0;
 
   const camDir = camPos ? camPos.copy().normalize().mult(-1) : createVector(0, 0, -1);
   const warmKeyDir = camDir.copy().mult(0.6);
   const coolRimDir = camDir.copy().mult(1.0);
 
-  const keyMul = disableTransparency ? 0.26 : 0.8;
-  const rimMul = disableTransparency ? 0.20 : 0.6;
+  let intensityMul = 1.0;
+  // FIX: Stronger dampening of directional light when opaque to prevent glare
+  if (transparencyFactor > 2.0) {
+      intensityMul = 0.4; 
+  }
+
+  const keyMul = (disableTransparency ? 0.26 : 0.8) * intensityMul;
+  const rimMul = (disableTransparency ? 0.20 : 0.6) * intensityMul;
 
   const captureToneMul = captureMode ? 1.0 : 1.0;
   const sTone = s * captureToneMul;
 
   if (disableTransparency) {
-    ambientLight(95 * sTone, 95 * sTone, 95 * sTone);
-    directionalLight(62 * sTone, 62 * sTone, 62 * sTone, -0.6, -0.4, -1);
-    pointLight(54 * sTone, 58 * sTone, 62 * sTone, -300, -200, 300);
-    pointLight(46 * sTone, 46 * sTone, 42 * sTone, 250, 200, -200);
-    pointLight(30 * sTone, 36 * sTone, 44 * sTone, 0, 300, -500);
-    const cornerOffset = 80;
-    const cornerZ = 300;
-    pointLight(60 * sTone, 68 * sTone, 72 * sTone, -width/2 + cornerOffset, -height/2 + cornerOffset, cornerZ);
+    ambientLight(120 * sTone, 120 * sTone, 120 * sTone);
+    directionalLight(58 * sTone, 58 * sTone, 58 * sTone, -0.6, -0.4, -1);
+    pointLight(50 * sTone, 52 * sTone, 56 * sTone, -300, -200, 300);
+    pointLight(40 * sTone, 40 * sTone, 38 * sTone, 250, 200, -200);
+    pointLight(26 * sTone, 32 * sTone, 40 * sTone, 0, 300, -500);
   } else {
+    // Reduced ambient to prevent washout
     ambientLight(90 * sTone, 90 * sTone, 95 * sTone);
-    directionalLight(150 * sTone, 150 * sTone, 140 * sTone, -0.6, -0.4, -1);
-    pointLight(120 * sTone, 130 * sTone, 160 * sTone, -300, -200, 300);
-    pointLight(115 * sTone, 105 * sTone, 90 * sTone, 250, 200, -200);
-    pointLight(70 * sTone, 86 * sTone, 108 * sTone, 0, 300, -500);
-    const cornerOffset = 80;
-    const cornerZ = 300;
-    pointLight(150 * sTone, 168 * sTone, 186 * sTone, -width/2 + cornerOffset, -height/2 + cornerOffset, cornerZ);
+    
+    directionalLight(120 * sTone * intensityMul, 120 * sTone * intensityMul, 110 * sTone * intensityMul, -0.6, -0.4, -1);
+    
+    pointLight(70 * sTone * intensityMul, 80 * sTone * intensityMul, 100 * sTone * intensityMul, -300, -200, 300);
+    pointLight(60 * sTone * intensityMul, 50 * sTone * intensityMul, 40 * sTone * intensityMul, 250, 200, -200);
+    pointLight(30 * sTone * intensityMul, 40 * sTone * intensityMul, 50 * sTone * intensityMul, 0, 300, -500);
   }
 
-  directionalLight(180 * keyMul * sTone, 140 * keyMul * sTone, 120 * keyMul * sTone, warmKeyDir.x, warmKeyDir.y, warmKeyDir.z);
-  directionalLight(90 * rimMul * sTone, 130 * rimMul * sTone, 200 * rimMul * sTone, coolRimDir.x, coolRimDir.y, coolRimDir.z);
+  directionalLight(160 * keyMul * sTone, 128 * keyMul * sTone, 110 * keyMul * sTone, warmKeyDir.x, warmKeyDir.y, warmKeyDir.z);
+  directionalLight(82 * rimMul * sTone, 118 * rimMul * sTone, 180 * rimMul * sTone, coolRimDir.x, coolRimDir.y, coolRimDir.z);
 }
 
 function scaledRGB(r, g, b, s) {
   return [constrain(r * s, 0, 255), constrain(g * s, 0, 255), constrain(b * s, 0, 255)];
 }
 
-function drawAllSP(kneadMode = false, prog = 0, skipP = false){
-  const matScale = captureMode ? 1.0 : 1.0;
+function drawTaperedLobeOuterTipSmooth(r){
+  let detail = 72;
+  noStroke();
 
-  if (sCount > 0) {
-    push();
-    noStroke();
-    const sRadius = 60 * SIZE_SCALE;
-    const [sr, sg, sb] = scaledRGB(100, 180, 255, matScale);
-    specularMaterial(sr * 0.9, sg * 0.9, sb * 0.9, A(220));
-    fill(sr, sg, sb, A(120));
-    ambientMaterial(sr, sg, sb, A(120));
-    shininess(getShininess() + 6);
-    sphere(sRadius, 64, 64);
-    pop();
+  for (let i = 0; i < detail; i++) {
+    let lat1 = map(i, 0, detail, -HALF_PI, HALF_PI);
+    let lat2 = map(i+1, 0, detail, -HALF_PI, HALF_PI);
+    
+    let z1 = sin(lat1);
+    let z2 = sin(lat2);
+    
+    let taper1 = map(z1, -1, 1, 0.45, 1.0);
+    let taper2 = map(z2, -1, 1, 0.45, 1.0);
+    
+    let r1 = cos(lat1) * r * taper1;
+    let r2 = cos(lat2) * r * taper2;
+    let h1 = z1 * r;
+    let h2 = z2 * r;
+
+    const b1 = computeOuterTipNormalBlend(z1);
+    const b2 = computeOuterTipNormalBlend(z2);
+
+    beginShape(TRIANGLE_STRIP);
+    for (let j = 0; j <= detail; j++) {
+      let lon = map(j, 0, detail, 0, TWO_PI);
+      let x = cos(lon);
+      let y = sin(lon);
+
+      // Blend normals toward pole (0,0,1) only near outer tip (+Z)
+      let n1x = lerp(x, 0, b1);
+      let n1y = lerp(y, 0, b1);
+      let n1z = lerp(z1, 1, b1);
+
+      let n2x = lerp(x, 0, b2);
+      let n2y = lerp(y, 0, b2);
+      let n2z = lerp(z2, 1, b2);
+
+      const l1 = Math.sqrt(n1x*n1x + n1y*n1y + n1z*n1z) || 1;
+      const l2 = Math.sqrt(n2x*n2x + n2y*n2y + n2z*n2z) || 1;
+
+      normal(n1x/l1, n1y/l1, n1z/l1);
+      vertex(x * r1, y * r1, h1);
+      
+      normal(n2x/l2, n2y/l2, n2z/l2);
+      vertex(x * r2, y * r2, h2);
+    }
+    endShape();
+  }
+}
+
+// Original tapered lobe geometry/normals (kept for inner tips / other shapes)
+function drawTaperedLobe(r) {
+  let detail = 72;
+  noStroke();
+
+  for (let i = 0; i < detail; i++) {
+    let lat1 = map(i, 0, detail, -HALF_PI, HALF_PI);
+    let lat2 = map(i+1, 0, detail, -HALF_PI, HALF_PI);
+    
+    let z1 = sin(lat1);
+    let z2 = sin(lat2);
+    
+    let taper1 = map(z1, -1, 1, 0.45, 1.0);
+    let taper2 = map(z2, -1, 1, 0.45, 1.0);
+    
+    let r1 = cos(lat1) * r * taper1;
+    let r2 = cos(lat2) * r * taper2;
+    let h1 = z1 * r;
+    let h2 = z2 * r;
+
+    beginShape(TRIANGLE_STRIP);
+    for (let j = 0; j <= detail; j++) {
+      let lon = map(j, 0, detail, 0, TWO_PI);
+      let x = cos(lon);
+      let y = sin(lon);
+      
+      normal(x, y, z1); 
+      vertex(x * r1, y * r1, h1);
+      
+      normal(x, y, z2);
+      vertex(x * r2, y * r2, h2);
+    }
+    endShape();
+  }
+}
+
+// Helper to blend outer tip normal
+function computeOuterTipNormalBlend(z){
+  const band = constrain(OUTER_TIP_NORMAL_SMOOTH, 0.0, 0.5);
+  if (band <= 0) return 0;
+  return constrain(map(z, 1 - band, 1, 0, 1), 0, 1);
+}
+
+function drawPorbital(axisVec, kneadMode=false, prog=0, idx=0, camPosLocal=null, isInner=false){
+  push();
+  alignVectorToAxis(axisVec);
+
+  const lobeRadiusBase = 40 * SIZE_SCALE;  
+  const scaleZ = 1.4;
+  const zOffset = lobeRadiusBase * scaleZ;
+
+  let camVec = camPosLocal ? camPosLocal.copy().normalize() : createVector(0,0,1);
+  let axisNorm = axisVec.copy().normalize();
+  let dot = axisNorm.dot(camVec);
+  const drawOrder = (dot > 0) ? ['neg','pos'] : ['pos','neg'];
+
+  // Apply outer-tip shading fix: reduce specular/shininess + smooth normals near OUTER tip
+  const shin = (getShininess() + 4) * OUTER_TIP_SHININESS_MUL;
+  const specMul = OUTER_TIP_SPECULAR_MUL;
+  
+  // FIX: Make inner P orbital punchier (more saturated) to fight blue tint
+  const rCol = isInner ? 255 : 255;
+  const gCol = isInner ? 80 : 100; // dark orange
+  const bCol = isInner ? 50 : 80;
+
+  for (let k = 0; k < drawOrder.length; k++){
+    if (drawOrder[k] === 'pos') {
+      push();
+      translate(0, 0, zOffset);
+      scale(0.8, 0.8, scaleZ);
+      noStroke();
+      
+      specularMaterial(rCol * 0.3 * specMul, gCol * 0.3 * specMul, bCol * 0.3 * specMul, A(180));
+      fill(rCol, gCol, bCol, A(70)); 
+      ambientMaterial(rCol, gCol, bCol, A(70));
+      shininess(shin);
+
+      drawTaperedLobeOuterTipSmooth(lobeRadiusBase);
+      pop();
+    } else {
+      push();
+      translate(0, 0, -zOffset);
+      rotateX(Math.PI); 
+      scale(0.8, 0.8, scaleZ);
+      noStroke();
+      
+      specularMaterial(rCol * 0.3 * specMul, gCol * 0.3 * specMul, bCol * 0.3 * specMul, A(180));
+      fill(rCol, gCol, bCol, A(180));
+      ambientMaterial(rCol, gCol, bCol, A(70));
+      shininess(shin);
+
+      drawTaperedLobeOuterTipSmooth(lobeRadiusBase);
+      pop();
+    }
   }
 
-  if (skipP) return;
-
-  for (let i = 0; i < pOrbitals.length; i++){
-    const displayAxis = getDisplayPAxis(i);
-    const displayPos = getDisplayPPos(i);
-    push();
-    translate(displayPos.x, displayPos.y, displayPos.z);
-    drawPorbital(displayAxis, false, 0, i, camPos);
-    pop();
-  }
+  pop();
 }
 
 function drawPOrbitals(){
@@ -851,24 +1292,7 @@ function drawKneadBlobOverlay(prog){
     fill(br, bg, bb, A(alpha));
     shininess(getShininess() + 4);
 
-    if (p.shape === 'sphere') {
-      sphere(p.size, 12, 12);
-    } else if (p.shape === 'ellipsoid') {
-      push();
-      const sx = 1.0;
-      const sy = 0.9 + 0.8 * noise(p.seed + 2.1);
-      const sz = 1.8 + 1.2 * morphE * noise(p.seed + 3.7);
-      scale(sx, sy, sz);
-      noStroke();
-      sphere(p.size * (0.9 + 0.6 * morphE), 12, 12);
-      pop();
-    } else {
-      push();
-      scale(1.0, 1.0, 0.28 + 0.18 * morphE);
-      noStroke();
-      sphere(p.size * (1.1 + 0.4 * noise(p.seed + 1.9)), 10, 10);
-      pop();
-    }
+    sphere(ELECTRON_SIZE, 16, 16);
     pop();
   }
 }
@@ -968,7 +1392,7 @@ function drawKneadBlobPoints(prog){
     fill(br, bg, bb, A(alpha));
     shininess(getShininess() + 4);
 
-    sphere(ELECTRON_SIZE, 12, 12);
+    sphere(ELECTRON_SIZE, 16, 16);
     pop();
   }
 }
@@ -990,28 +1414,40 @@ function drawPorbital(axisVec, kneadMode=false, prog=0, idx=0, camPosLocal=null)
   let dot = axisNorm.dot(camVec);
   const drawOrder = (dot > 0) ? ['neg','pos'] : ['pos','neg'];
 
+  // Apply outer-tip shading fix: reduce specular/shininess + smooth normals near OUTER tip
+  const shin = (getShininess() + 4) * OUTER_TIP_SHININESS_MUL;
+  const specMul = OUTER_TIP_SPECULAR_MUL;
+
   for (let k = 0; k < drawOrder.length; k++){
     if (drawOrder[k] === 'pos') {
       push();
       translate(0, 0, zOffset);
       scale(0.8, 0.8, scaleZ);
       noStroke();
-      specularMaterial(255 * 0.85, 100 * 0.85, 80 * 0.85, A(200));
-      fill(255, 100, 80, A(120));
-      ambientMaterial(255, 100, 80, A(120));
-      shininess(getShininess() + 6);
-      sphere(lobeRadiusBase, 64, 64);
+      
+      specularMaterial(255 * 0.9 * specMul, 100 * 0.9 * specMul, 80 * 0.9 * specMul, A(180));
+      fill(255, 100, 80, A(70)); 
+      ambientMaterial(255, 100, 80, A(70));
+      shininess(shin);
+
+      // Outer tip is +Z => smooth only that end
+      drawTaperedLobeOuterTipSmooth(lobeRadiusBase);
       pop();
     } else {
       push();
       translate(0, 0, -zOffset);
+      // Flip the negative lobe so the narrow end points to center
+      rotateX(Math.PI); 
       scale(0.8, 0.8, scaleZ);
       noStroke();
-      specularMaterial(255 * 0.85, 100 * 0.85, 80 * 0.85, A(200));
-      fill(255, 100, 80, A(120));
-      ambientMaterial(255, 100, 80, A(120));
-      shininess(getShininess() + 6);
-      sphere(lobeRadiusBase, 64, 64);
+      
+      specularMaterial(255 * 0.9 * specMul, 100 * 0.9 * specMul, 80 * 0.9 * specMul, A(180));
+      fill(255, 100, 80, A(70));
+      ambientMaterial(255, 100, 80, A(70));
+      shininess(shin);
+
+      // After rotateX(PI), outer tip still corresponds to +Z in local lobe coords
+      drawTaperedLobeOuterTipSmooth(lobeRadiusBase);
       pop();
     }
   }
@@ -1156,47 +1592,56 @@ function drawHybrids(hybridDisplay){
   const matMul = disableTransparency ? 0.65 : 1.0;
   const alphaMul = disableTransparency ? 0.72 : 1.0;
 
-  for (let item of drawItems){
+  for (let item of drawItems) {
     const h = item.hybrid;
     push();
     translate(item.worldPos.x, item.worldPos.y, item.worldPos.z);
     alignVectorToAxis(item.displayDir);
 
-    let camVec = camPos ? camPos.copy().normalize() : createVector(0,0,1);
-    let axisNorm = item.displayDir.copy().normalize();
-    let dot = axisNorm.dot(camVec);
-    const drawOrder = (dot > 0) ? ['neg','pos'] : ['pos','neg'];
-
-    const bigScaleZ = 1.5;
-    const innerBigTranslate = h.bigRadius * bigScaleZ;
     const smallScaleZ = 1.2;
     const innerSmallTranslate = h.smallRadius * smallScaleZ;
 
-    for (let k = 0; k < drawOrder.length; k++){
-      if (drawOrder[k] === 'pos') {
-        push();
-        translate(0, 0, innerBigTranslate); 
-        noStroke();
-        specularMaterial(100 * 0.9 * matMul, 255 * 0.9 * matMul, 150 * 0.9 * matMul, A(210 * alphaMul));
-        fill(100 * matMul, 255 * matMul, 150 * matMul, A(130 * alphaMul)); 
-        ambientMaterial(100 * matMul, 255 * matMul, 150 * matMul, A(130 * alphaMul));
-        shininess(getShininess() + 6);
-        scale(1, 1, bigScaleZ); 
-        sphere(h.bigRadius, 64, 64);
-        pop();
-      } else {
-        push();
-        translate(0, 0, -innerSmallTranslate);
-        noStroke();
-        specularMaterial(100 * 0.9 * matMul, 255 * 0.9 * matMul, 150 * 0.9 * matMul, A(200 * alphaMul));
-        fill(100 * matMul, 255 * matMul, 150 * matMul, A(120 * alphaMul));
-        ambientMaterial(100 * matMul, 255 * matMul, 150 * matMul, A(120 * alphaMul));
-        shininess(getShininess() + 6);
-        scale(0.8, 0.8, smallScaleZ);
-        sphere(h.smallRadius, 48, 48);
-        pop();
-      }
-    }
+    push();
+    translate(0, 0, -innerSmallTranslate);
+    rotateX(Math.PI); // Flip small lobe so narrow end is near center
+    noStroke();
+
+    const smallSpecA = A(180 * alphaMul * 0.62);
+    const smallFillA = A(100 * alphaMul * 0.62);
+
+    specularMaterial(50 * matMul, 130 * matMul, 80 * matMul, smallSpecA);
+    fill(50 * matMul, 160 * matMul, 100 * matMul, smallFillA);
+    ambientMaterial(50 * matMul, 160 * matMul, 100 * matMul, smallFillA);
+
+    shininess(2); 
+    scale(0.8, 0.8, smallScaleZ);
+    drawTaperedLobe(h.smallRadius);
+    pop();
+    
+    pop();
+  }
+
+  for (let item of drawItems) {
+    const h = item.hybrid;
+    push();
+    translate(item.worldPos.x, item.worldPos.y, item.worldPos.z);
+    alignVectorToAxis(item.displayDir);
+
+    const bigScaleZ = 1.5;
+    const innerBigTranslate = h.bigRadius * bigScaleZ;
+
+    push();
+    translate(0, 0, innerBigTranslate); 
+    noStroke();
+    specularMaterial(120 * 0.9 * matMul, 255 * 0.9 * matMul, 180 * 0.9 * matMul, A(100 * alphaMul));
+    fill(120 * matMul, 255 * matMul, 180 * matMul, A(60 * alphaMul)); 
+    ambientMaterial(120 * matMul, 255 * matMul, 180 * matMul, A(60 * alphaMul));
+    shininess(getShininess() + 5);
+    scale(1, 1, bigScaleZ);
+
+    drawTaperedLobeOuterTipSmooth(h.bigRadius);
+    pop();
+    
     pop();
   }
 }
@@ -1210,17 +1655,14 @@ function rotateVectorAroundAxis(v, k, theta) {
   return p5.Vector.add(p5.Vector.add(vcos, kCrossV), kPart);
 }
 
-function drawAxesOverlay(hybridDisplay){
-  const gl = drawingContext;
-  if (gl) { gl.enable(gl.DEPTH_TEST); gl.depthMask(true); }
-
+function drawAxesNormal(hybridDisplay){
   push();
-  stroke(230, 230, 230, A(150));
-  strokeWeight(1.5);
-
-  const P_ORBITAL_EXTRA_PX = 20;
-  const P_CAP_EXTRA_WORLD = 60;
-
+  noStroke();
+  
+  fill(220, 0, 0); 
+  emissiveMaterial(80, 0, 0); 
+  ambientMaterial(220, 0, 0);
+  
   for (let i = 0; i < pOrbitals.length; i++){
     push();
     const axisDir = getDisplayPAxis(i).copy().normalize();
@@ -1233,18 +1675,13 @@ function drawAxesOverlay(hybridDisplay){
     const zOffset = lobeRadiusBase * scaleZ;
     const surfaceOffset = zOffset + lobeRadiusBase * scaleZ;
 
-    const posEndpoint = p5.Vector.add(posCenter, axisDir.copy().mult(surfaceOffset));
-    const distPos = p5.Vector.sub(camPos, posEndpoint).mag();
-    const worldPerPixelPos = (2 * distPos * Math.tan(FOV / 2.0)) / height;
-    const extraLen = min(P_ORBITAL_EXTRA_PX * worldPerPixelPos, P_CAP_EXTRA_WORLD);
+    const axisLen = (surfaceOffset + 10) * 2;
 
     alignVectorToAxis(axisDir);
-    line(0, 0, -(surfaceOffset + extraLen), 0, 0, (surfaceOffset + extraLen));
+    rotateX(HALF_PI);
+    cylinder(1.5, axisLen, 32, 1);
     pop();
   }
-
-  const HYBRID_EXTRA_PX = 16;
-  const HYBRID_CAP_EXTRA = 40;
 
   if (hybridList.length > 0 && hybridDisplay) {
     for (let i = 0; i < hybridDisplay.items.length; i++){
@@ -1259,28 +1696,27 @@ function drawAxesOverlay(hybridDisplay){
       const innerSmallTranslate = h.smallRadius * smallScaleZ;
       const bigSurface = innerBigTranslate + h.bigRadius * bigScaleZ;
       const smallSurface = innerSmallTranslate + h.smallRadius * smallScaleZ;
-
-      const posEndWorld = p5.Vector.add(displayPos, p5.Vector.mult(displayDir, bigSurface));
-      const distCam = p5.Vector.sub(camPos, posEndWorld).mag();
-      const worldPerPx = (2 * distCam * Math.tan(FOV / 2.0)) / height;
-      const extraLen = min(HYBRID_EXTRA_PX * worldPerPx, HYBRID_CAP_EXTRA);
+      
+      const negLimit = smallSurface + 10;
+      const posLimit = bigSurface + 10;
+      const totalLen = negLimit + posLimit;
 
       push();
       translate(displayPos.x, displayPos.y, displayPos.z);
       alignVectorToAxis(displayDir);
+      
+      let centerShift = (posLimit - negLimit) / 2;
+      translate(0, 0, centerShift);
 
-      const negLimit = smallSurface + extraLen;
-      const posLimit = bigSurface + extraLen;
-      line(0, 0, -negLimit, 0, 0, posLimit);
+      rotateX(HALF_PI);
+      cylinder(1.5, totalLen, 32, 1);
       pop();
     }
   }
 
   pop();
-  if (gl) gl.enable(gl.DEPTH_TEST);
 }
 
-// Interaction
 function mousePressed(){
   if (mouseX > 0 && mouseX < width && mouseY > 0 && mouseY < height){
     isDragging = true;
@@ -1293,9 +1729,20 @@ function mouseDragged(){
   if (!isDragging) return;
   let dx = (mouseX - lastMouseX);
   let dy = (mouseY - lastMouseY);
-  // Invert to match intuitive drag direction
-  rotY -= dx * 0.005;
-  rotX -= dy * 0.005;
+  
+  const sens = 0.005;
+  
+  let camDir = camPos.copy().normalize();
+  let right = camDir.cross(camUp).normalize();
+  if (right.mag() < 0.001) right = createVector(1,0,0); 
+
+  let qY = new Quaternion().setFromAxisAngle(camUp, -dx * sens);
+  camPos = qY.rotateVector(camPos);
+  
+  let qX = new Quaternion().setFromAxisAngle(right, -dy * sens);
+  camPos = qX.rotateVector(camPos);
+  camUp = qX.rotateVector(camUp);
+
   lastMouseX = mouseX;
   lastMouseY = mouseY;
 }
@@ -1307,10 +1754,9 @@ function mouseWheel(event){
   return false;
 }
 
-// Capture with 4K, transparent background, and preserved zoom/framing
 function captureImage4KTransparent(){
   if (captureMode) return;
-  captureMode = true; // makes draw() use clear() for transparent background
+  captureMode = true;
 
   const targetW = 3840;
   const targetH = 2160;
@@ -1326,12 +1772,11 @@ function captureImage4KTransparent(){
   resizeCanvas(targetW, targetH);
   perspective(FOV, targetW / targetH, CAMERA_NEAR, CAMERA_FAR);
 
-  // adjust camDist to preserve the same radius/framing after resize
   const newBaseZ = cameraBaseZ();
   camDist = prevRadius - newBaseZ;
   clampCamDist();
 
-  redraw(); // render one frame at 4K with transparency
+  redraw();
 
   const now = new Date();
   const pad = n => (n < 10 ? '0' + n : n);
@@ -1340,7 +1785,6 @@ function captureImage4KTransparent(){
   setTimeout(()=> {
     saveCanvas(fname, 'png');
 
-    // Restore previous viewport, pixel density, and framing
     pixelDensity(prevPD);
     resizeCanvas(prevW, prevH);
     perspective(FOV, prevW / prevH, CAMERA_NEAR, CAMERA_FAR);
@@ -1350,10 +1794,9 @@ function captureImage4KTransparent(){
 
     captureMode = false;
     loop();
-  }, 40); // slight delay to ensure the 4K frame is ready
+  }, 40);
 }
 
-// -------- Point-mode helpers & motion --------
 function ensureElectronClouds(){
   if (renderMode !== 'points') return;
   if (!electronsDirty) return;
@@ -1430,7 +1873,7 @@ function generatePElectrons(count){
     p.z += sign * zOffset;
     if (!inside) p.mult(1.0 + ELECTRON_NEAR_MARGIN);
     if (p.mag() < CORE_MIN_DIST) continue;
-    if (Math.abs(p.z) < NODE_BAND_P) continue; // avoid near nodal plane (narrow)
+    if (Math.abs(p.z) < NODE_BAND_P) continue;
     if (enforceSeparation(p, arr)) {
       arr.push({pos: p, vel: randVel()});
     }
@@ -1461,7 +1904,7 @@ function generateHybridElectrons(count, h){
     }
     if (!inside) p.mult(1.0 + ELECTRON_NEAR_MARGIN);
     if (p.mag() < CORE_MIN_DIST) continue;
-    if (Math.abs(p.z) < NODE_BAND_H) continue; // avoid near nodal plane (narrow)
+    if (Math.abs(p.z) < NODE_BAND_H) continue;
     if (enforceSeparation(p, arr)) {
       arr.push({pos: p, vel: randVel()});
     }
